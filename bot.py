@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+dp["bot"] = bot
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+dp["bot"] = bot
 router = Router()
 dp.include_router(router)
 
@@ -646,7 +650,8 @@ async def cb_reject(callback: CallbackQuery):
 async def main():
     await init_db()
     logger.info("Bot started.")
-    await dp.start_polling(bot)
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":
