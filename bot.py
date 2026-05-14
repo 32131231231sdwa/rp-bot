@@ -100,10 +100,9 @@ async def db_all_countries():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, name, capital, government FROM countries WHERE approved = 1 ORDER BY name"
+            "SELECT id, name, capital, government, link FROM countries WHERE approved = 1 ORDER BY name"
         ) as cursor:
             return await cursor.fetchall()
-
 
 async def db_pending_countries():
     async with aiosqlite.connect(DB_PATH) as db:
