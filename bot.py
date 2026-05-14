@@ -323,33 +323,46 @@ async def cmd_register(message: Message, state: FSMContext):
     )
 
 
-@router.message(RegisterCountry.name)
+@router.message(RegisterCountry.name, F.text)
 async def reg_name(message: Message, state: FSMContext):
     name = message.text.strip()
-    existing = await db_get_country(name)
+    async with db_pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT id FROM countries WHERE LOWER(name) = LOWER($1)", name
+        )
     if existing:
-        await message.answer("❌ Страна с таким названием уже существует. Введи другое название:")
+        await message.answer("❌ Страна с таким названием уже существует или ожидает проверки. Введи другое название:")
         return
     await state.update_data(name=name)
     await state.set_state(RegisterCountry.description)
     await message.answer("Шаг 2/6: Введи <b>краткое описание</b> страны (1-3 предложения):", parse_mode=ParseMode.HTML)
 
 
-@router.message(RegisterCountry.description)
+@router.message(RegisterCountry.description, F.text)
 async def reg_description(message: Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
     await state.set_state(RegisterCountry.capital)
     await message.answer("Шаг 3/6: Введи <b>столицу</b>:", parse_mode=ParseMode.HTML)
 
 
-@router.message(RegisterCountry.capital)
+@router.message(RegisterCountry.description)
+async def reg_description_wrong(message: Message):
+    await message.answer("Пожалуйста, введи описание текстом.")
+
+
+@router.message(RegisterCountry.capital, F.text)
 async def reg_capital(message: Message, state: FSMContext):
     await state.update_data(capital=message.text.strip())
     await state.set_state(RegisterCountry.government)
     await message.answer("Шаг 4/6: Введи <b>форму правления</b> (например: Монархия, Республика, Теократия):", parse_mode=ParseMode.HTML)
 
 
-@router.message(RegisterCountry.government)
+@router.message(RegisterCountry.capital)
+async def reg_capital_wrong(message: Message):
+    await message.answer("Пожалуйста, введи столицу текстом.")
+
+
+@router.message(RegisterCountry.government, F.text)
 async def reg_government(message: Message, state: FSMContext):
     await state.update_data(government=message.text.strip())
     await state.set_state(RegisterCountry.photo)
@@ -358,6 +371,11 @@ async def reg_government(message: Message, state: FSMContext):
         "Или напиши <code>пропустить</code> чтобы добавить позже.",
         parse_mode=ParseMode.HTML
     )
+
+
+@router.message(RegisterCountry.government)
+async def reg_government_wrong(message: Message):
+    await message.answer("Пожалуйста, введи форму правления текстом.")
 
 
 @router.message(RegisterCountry.photo, F.photo)
@@ -378,7 +396,7 @@ async def reg_photo_skip(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, отправь фото или напиши <code>пропустить</code>.", parse_mode=ParseMode.HTML)
 
 
-@router.message(RegisterCountry.link)
+@router.message(RegisterCountry.link, F.text)
 async def reg_link(message: Message, state: FSMContext):
     link = message.text.strip()
     if link.lower() in ("нет", "no", "-", "none"):
@@ -405,7 +423,7 @@ async def reg_link(message: Message, state: FSMContext):
         await message.answer(preview, parse_mode=ParseMode.HTML)
 
 
-@router.message(RegisterCountry.confirm)
+@router.message(RegisterCountry.confirm, F.text)
 async def reg_confirm(message: Message, state: FSMContext):
     if message.text.lower() not in ("да", "yes", "y", "д"):
         await state.clear()
@@ -415,18 +433,28 @@ async def reg_confirm(message: Message, state: FSMContext):
     data = await state.get_data()
     username = message.from_user.username or str(message.from_user.id)
 
-    await db_add_country(
-        owner_id=message.from_user.id,
-        owner_username=username,
-        name=data["name"],
-        description=data["description"],
-        capital=data["capital"],
-        government=data["government"],
-        photo_id=data.get("photo_id"),
-        link=data.get("link"),
-    )
-
+    # Сбрасываем состояние ДО записи в БД — пользователь не застрянет при любой ошибке
     await state.clear()
+
+    try:
+        await db_add_country(
+            owner_id=message.from_user.id,
+            owner_username=username,
+            name=data["name"],
+            description=data["description"],
+            capital=data["capital"],
+            government=data["government"],
+            photo_id=data.get("photo_id"),
+            link=data.get("link"),
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении страны от {message.from_user.id}: {e}")
+        await message.answer(
+            "⚠️ Не удалось сохранить заявку. Возможно, страна с таким названием уже существует.\n"
+            "Попробуй снова: /register"
+        )
+        return
+
     await message.answer(
         f"✅ Заявка на регистрацию страны <b>{data['name']}</b> отправлена на модерацию!\n"
         "Ты получишь уведомление после проверки.",
