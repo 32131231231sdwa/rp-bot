@@ -1,11 +1,11 @@
 """
 Telegram RP Country Archive Bot
-Requires: pip install aiogram==3.x aiosqlite
+Requires: pip install aiogram asyncpg
 """
 
 import asyncio
 import logging
-import aiosqlite
+import asyncpg
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -19,10 +19,9 @@ from aiogram.enums import ParseMode
 import os
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
-BOT_TOKEN = "8828014458:AAGo-lRVykbmNQWnbH_v_dW7ZIIGRwFyrxM"  # <-- Вставь токен сюда
-DB_PATH = "countries.db"
-# Telegram user IDs суперадминов (через запятую). Чат-админы определяются автоматически.
-SUPER_ADMINS: set[int] = {1360482515, 6089338514, 6299402428}  # <-- Вставь свой Telegram ID
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8828014458:AAGo-lRVykbmNQWnbH_v_dW7ZIIGRwFyrxM")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:zsVNGaIPcFaCYBUbipeooPAoittPneWi@postgres.railway.internal:5432/railway")
+SUPER_ADMINS: set[int] = {1360482515, 6089338514, 6299402428}
 # ──────────────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(level=logging.INFO)
@@ -30,12 +29,10 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-dp["bot"] = bot
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-dp["bot"] = bot
 router = Router()
 dp.include_router(router)
+
+db_pool: asyncpg.Pool = None
 
 
 # ─── FSM STATES ───────────────────────────────────────────────────────────────
@@ -57,11 +54,13 @@ class EditCountry(StatesGroup):
 
 # ─── DATABASE ─────────────────────────────────────────────────────────────────
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS countries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                owner_id INTEGER NOT NULL,
+                id SERIAL PRIMARY KEY,
+                owner_id BIGINT NOT NULL,
                 owner_username TEXT,
                 name TEXT NOT NULL UNIQUE,
                 description TEXT,
@@ -73,98 +72,87 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        await db.commit()
 
 
 async def db_get_country(name: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM countries WHERE LOWER(name) = LOWER(?) AND approved = 1",
-            (name,)
-        ) as cursor:
-            return await cursor.fetchone()
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM countries WHERE LOWER(name) = LOWER($1) AND approved = 1",
+            name
+        )
 
 
 async def db_search_countries(query: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM countries WHERE LOWER(name) LIKE LOWER(?) AND approved = 1 LIMIT 10",
-            (f"%{query}%",)
-        ) as cursor:
-            return await cursor.fetchall()
+    async with db_pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT * FROM countries WHERE LOWER(name) LIKE LOWER($1) AND approved = 1 LIMIT 10",
+            f"%{query}%"
+        )
 
 
 async def db_all_countries():
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
+    async with db_pool.acquire() as conn:
+        return await conn.fetch(
             "SELECT id, name, capital, government, link FROM countries WHERE approved = 1 ORDER BY name"
-        ) as cursor:
-            return await cursor.fetchall()
+        )
+
 
 async def db_pending_countries():
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
+    async with db_pool.acquire() as conn:
+        return await conn.fetch(
             "SELECT * FROM countries WHERE approved = 0 ORDER BY created_at"
-        ) as cursor:
-            return await cursor.fetchall()
+        )
 
 
 async def db_add_country(owner_id, owner_username, name, description, capital, government, photo_id, link):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
             INSERT INTO countries (owner_id, owner_username, name, description, capital, government, photo_id, link, approved)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-        """, (owner_id, owner_username, name, description, capital, government, photo_id, link))
-        await db.commit()
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)
+        """, owner_id, owner_username, name, description, capital, government, photo_id, link)
 
 
 async def db_approve_country(country_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE countries SET approved = 1 WHERE id = ?", (country_id,))
-        await db.commit()
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE countries SET approved = 1 WHERE id = $1", country_id)
 
 
 async def db_delete_country(country_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM countries WHERE id = ?", (country_id,))
-        await db.commit()
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM countries WHERE id = $1", country_id)
 
 
 async def db_delete_country_by_name(name: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id FROM countries WHERE LOWER(name) = LOWER(?)", (name,)) as cursor:
-            row = await cursor.fetchone()
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT id FROM countries WHERE LOWER(name) = LOWER($1)", name)
         if row:
-            await db.execute("DELETE FROM countries WHERE id = ?", (row[0],))
-            await db.commit()
+            await conn.execute("DELETE FROM countries WHERE id = $1", row["id"])
             return True
         return False
 
 
 async def db_get_user_country(owner_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM countries WHERE owner_id = ? ORDER BY created_at DESC LIMIT 1",
-            (owner_id,)
-        ) as cursor:
-            return await cursor.fetchone()
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM countries WHERE owner_id = $1 ORDER BY created_at DESC LIMIT 1",
+            owner_id
+        )
+
+
+async def db_get_country_by_id(country_id: int):
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM countries WHERE id = $1", country_id)
 
 
 async def db_update_field(owner_id: int, field: str, value):
     allowed = {"name", "description", "capital", "government", "photo_id", "link"}
     if field not in allowed:
         return False
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            f"UPDATE countries SET {field} = ? WHERE owner_id = ?",
-            (value, owner_id)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE countries SET {field} = $1 WHERE owner_id = $2",
+            value, owner_id
         )
-        await db.commit()
     return True
 
 
@@ -211,6 +199,14 @@ def edit_fields_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+LINK_STEP_TEXT = (
+    "Шаг 6/6: Введи <b>ссылку на полную анкету</b>.\n\n"
+    "💡 <i>Как получить ссылку:</i> отправь анкету своей страны в чат, затем нажми и удержи сообщение → "
+    "<b>Скопировать ссылку на сообщение</b> — вот это и вставляй сюда.\n\n"
+    "Или напиши <code>нет</code> если ссылки пока нет."
+)
+
+
 # ─── COMMANDS IN GROUP CHAT ───────────────────────────────────────────────────
 @router.message(Command("country"))
 async def cmd_country(message: Message):
@@ -235,7 +231,6 @@ async def cmd_country(message: Message):
             await message.reply(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
-    # Поиск похожих
     results = await db_search_countries(query)
     if not results:
         await message.reply(f'❌ Страна "{query}" не найдена.')
@@ -289,13 +284,7 @@ async def cmd_pending(message: Message):
     if not await is_chat_admin(message):
         await message.reply("🚫 Только администраторы могут просматривать очередь.")
         return
-
-    pending = await db_pending_countries()
-    if not pending:
-        await message.reply("✅ Очередь на модерацию пуста.")
-        return
-
-    await message.reply(f"📋 Заявок на модерацию: {len(pending)}. Проверьте ЛС бота командой /pending там.")
+    await message.reply("📋 Проверь очередь в ЛС боту командой /pending там.")
 
 
 # ─── PRIVATE: REGISTRATION ────────────────────────────────────────────────────
@@ -371,14 +360,6 @@ async def reg_government(message: Message, state: FSMContext):
     )
 
 
-LINK_STEP_TEXT = (
-    "Шаг 6/6: Введи <b>ссылку на полную анкету</b>.\n\n"
-    "💡 <i>Как получить ссылку:</i> отправь анкету своей страны в чат, затем нажми и удержи сообщение → "
-    "<b>Скопировать ссылку на сообщение</b> — вот это и вставляй сюда.\n\n"
-    "Или напиши <code>нет</code> если ссылки пока нет."
-)
-
-
 @router.message(RegisterCountry.photo, F.photo)
 async def reg_photo(message: Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
@@ -452,7 +433,6 @@ async def reg_confirm(message: Message, state: FSMContext):
         parse_mode=ParseMode.HTML
     )
 
-    # Уведомить суперадминов
     pending = await db_pending_countries()
     last = pending[-1] if pending else None
     if last:
@@ -524,7 +504,7 @@ async def edit_new_value(message: Message, state: FSMContext):
 
     await db_update_field(message.from_user.id, field, value)
     await state.clear()
-    await message.answer(f"✅ Поле обновлено!", reply_markup=ReplyKeyboardRemove())
+    await message.answer("✅ Поле обновлено!", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(EditCountry.new_photo, F.photo)
@@ -585,19 +565,22 @@ async def cb_approve(callback: CallbackQuery):
     country_id = int(callback.data.split(":")[1])
     await db_approve_country(country_id)
     await callback.answer("✅ Одобрено!")
-    await callback.message.edit_caption(
-        callback.message.caption + "\n\n✅ <b>ОДОБРЕНО</b>",
-        parse_mode=ParseMode.HTML
-    ) if callback.message.caption else await callback.message.edit_text(
-        callback.message.text + "\n\n✅ <b>ОДОБРЕНО</b>",
-        parse_mode=ParseMode.HTML
-    )
 
-    # Уведомить владельца
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM countries WHERE id = ?", (country_id,)) as cur:
-            c = await cur.fetchone()
+    try:
+        if callback.message.caption:
+            await callback.message.edit_caption(
+                callback.message.caption + "\n\n✅ <b>ОДОБРЕНО</b>",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await callback.message.edit_text(
+                callback.message.text + "\n\n✅ <b>ОДОБРЕНО</b>",
+                parse_mode=ParseMode.HTML
+            )
+    except Exception:
+        pass
+
+    c = await db_get_country_by_id(country_id)
     if c:
         try:
             await bot.send_message(
@@ -616,22 +599,23 @@ async def cb_reject(callback: CallbackQuery):
         return
 
     country_id = int(callback.data.split(":")[1])
-
-    # Уведомить владельца перед удалением
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM countries WHERE id = ?", (country_id,)) as cur:
-            c = await cur.fetchone()
-
+    c = await db_get_country_by_id(country_id)
     await db_delete_country(country_id)
     await callback.answer("❌ Отклонено и удалено.")
-    await callback.message.edit_caption(
-        (callback.message.caption or "") + "\n\n❌ <b>ОТКЛОНЕНО</b>",
-        parse_mode=ParseMode.HTML
-    ) if callback.message.caption else await callback.message.edit_text(
-        (callback.message.text or "") + "\n\n❌ <b>ОТКЛОНЕНО</b>",
-        parse_mode=ParseMode.HTML
-    )
+
+    try:
+        if callback.message.caption:
+            await callback.message.edit_caption(
+                (callback.message.caption or "") + "\n\n❌ <b>ОТКЛОНЕНО</b>",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await callback.message.edit_text(
+                (callback.message.text or "") + "\n\n❌ <b>ОТКЛОНЕНО</b>",
+                parse_mode=ParseMode.HTML
+            )
+    except Exception:
+        pass
 
     if c:
         try:
