@@ -253,11 +253,33 @@ async def cmd_countries(message: Message):
         gov = c["government"] or "—"
         cap = c["capital"] or "—"
         lines.append(f"🌍 <b>{c['name']}</b> | {gov} | 🏙 {cap}")
-        if c["link"]:
-            buttons.append([InlineKeyboardButton(text=f"📖 {c['name']}", url=c["link"])])
+        buttons.append([InlineKeyboardButton(text=f"🌍 {c['name']}", callback_data=f"show:{c['id']}")])
 
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.reply("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("show:"))
+async def cb_show_country(callback: CallbackQuery):
+    country_id = int(callback.data.split(":")[1])
+    c = await db_get_country_by_id(country_id)
+    await callback.answer()
+
+    if not c or not c["approved"]:
+        await callback.answer("❌ Страна не найдена.", show_alert=True)
+        return
+
+    text = country_card_text(c)
+    kb = None
+    if c["link"]:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔗 Полная анкета", url=c["link"])
+        ]])
+
+    if c["photo_id"]:
+        await callback.message.answer_photo(photo=c["photo_id"], caption=text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 @router.message(Command("deleteCountry"))
@@ -634,8 +656,13 @@ async def main():
     await init_db()
     logger.info("Bot started.")
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
-
-
+    await dp.start_polling(
+        bot,
+        allowed_updates=["message", "callback_query"],
+        handle_signals=True,
+        reconnect=True,
+        request_timeout=30,
+        backoff_config={"min_delay": 1, "max_delay": 10, "factor": 1.5},
+    )
 if __name__ == "__main__":
     asyncio.run(main())
