@@ -660,9 +660,6 @@ async def main():
         bot,
         allowed_updates=["message", "callback_query"],
         handle_signals=True,
-        reconnect=True,
-        request_timeout=30,
-        backoff_config={"min_delay": 1, "max_delay": 10, "factor": 1.5},
     )
 if __name__ == "__main__":
     asyncio.run(main())
