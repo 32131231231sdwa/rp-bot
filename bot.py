@@ -976,6 +976,28 @@ async def cb_leave_alliance(callback: CallbackQuery):
     await callback.message.answer(f"✅ Страна <b>{country['name']}</b> вышла из альянса <b>{a['name']}</b>.", parse_mode=ParseMode.HTML)
 
 
+# ─── ALLIANCE ADMIN ───────────────────────────────────────────────────────────
+@router.message(Command("deleteAlliance"))
+async def cmd_delete_alliance(message: Message):
+    if not await is_chat_admin(message):
+        await message.reply("🚫 Только администраторы могут удалять альянсы.")
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.reply("Использование: /deleteAlliance НазваниеАльянса")
+        return
+
+    name = args[1].strip()
+    deleted = await db_delete_alliance_by_name(name)
+    if deleted:
+        username = message.from_user.username or str(message.from_user.id)
+        await db_log_action(message.from_user.id, username, "Удаление альянса", f"Альянс: {name}")
+        await message.reply(f'✅ Альянс "{name}" удалён.')
+    else:
+        await message.reply(f'❌ Альянс "{name}" не найден.')
+
+
 # ─── MODERATION CALLBACKS ─────────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve(callback: CallbackQuery):
